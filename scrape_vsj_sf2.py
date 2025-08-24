@@ -1,27 +1,26 @@
 # -*- coding: utf-8 -*-
 """
-VSJ SF2 — Scraper de classificació RFEVB -> CSV local per a OBS
-
-Escriu:
-    C:\Guillem\Temporada 25-26\Overlay\VSJ\SF2\classificacio.csv
-    C:\Guillem\Temporada 25-26\Overlay\VSJ\SF2\classificacio_top3.txt
+VSJ SF2 — Scraper de classificació RFEVB -> CSV local per a OBS.
+Guarda:
+  C:\Guillem\Temporada 25-26\Overlay\VSJ\SF2\classificacio.csv
+  C:\Guillem\Temporada 25-26\Overlay\VSJ\SF2\classificacio_top3.txt
 """
 
-import time
 import os
 import sys
 import io
+import time
 import pandas as pd
 import requests
 
-# Carpeta on es guardaran els fitxers per a l’OBS
+# Carpeta d'output (ajustada a la teva)
 OUT_DIR = r"C:\Guillem\Temporada 25-26\Overlay\VSJ\SF2"
 CSV_OUT = os.path.join(OUT_DIR, "classificacio.csv")
 TOP3_TXT = os.path.join(OUT_DIR, "classificacio_top3.txt")
 
-# 👉 Quan surti la temporada nova, actualitza l'ID del microsite aquí
+# 👉 Actualitza l'ID/URLs quan surti la temporada nova
 URLS = [
-    "https://rfevb-web.dataproject.com/CompetitionHome.aspx?ID=136",  # exemple (temp. anterior)
+    "https://rfevb-web.dataproject.com/CompetitionHome.aspx?ID=136",  # exemple (temporada anterior)
     "https://www.rfevb.com/superliga-femenina-2-grupo-b-clasificacion",
 ]
 
@@ -29,8 +28,8 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
 
 def pick_standing_table(tables):
-    """Tria la taula que sembli una classificació (pos, equip, punts...)."""
-    KEYWORDS = ["pos", "equ", "team", "pt", "punt", "points", "pj", "jug"]
+    """Tria la taula més probable de classificació per paraules clau."""
+    KEYWORDS = ["pos", "equ", "team", "pt", "punt", "points", "pj", "jug", "clasific"]
     best = None
     best_score = -1
     for i, df in enumerate(tables):
@@ -43,44 +42,87 @@ def pick_standing_table(tables):
     return best
 
 
+def read_html_tables(html_text: str):
+    """
+    Llegeix taules HTML des d'un string.
+    Prova primer 'lxml' i, si falla, intenta 'html5lib'.
+    """
+    # 1) Intent amb lxml
+    try:
+        return pd.read_html(io.StringIO(html_text), flavor="lxml")
+    except Exception as e1:
+        print(f"   ⚠️  lxml no ha funcionat: {e1}")
+
+    # 2) Fallback a html5lib
+    try:
+        return pd.read_html(io.StringIO(html_text), flavor="html5lib")
+    except ImportError:
+        print("   ❗ Falta el parser 'html5lib'. Instal·la'l a l'entorn virtual:")
+        print(r"      .\.venv\Scripts\pip.exe install html5lib")
+        return []
+    except Exception as e2:
+        print(f"   ✖️  html5lib tampoc ha funcionat: {e2}")
+        return []
+
+
 def fetch_table():
+    """Baixa cadascuna de les URL i retorna el DataFrame de classificació triat."""
     for url in URLS:
         try:
             print(f"➡️  Baixant URL: {url}")
             res = requests.get(url, headers=HEADERS, timeout=20)
             res.raise_for_status()
             html = res.text
-            # Future-proof: llegir HTML amb StringIO
-            tables = pd.read_html(io.StringIO(html))
+
+            tables = read_html_tables(html)
             print(f"   → trobades {len(tables)} taules HTML")
             if not tables:
                 continue
+
             df = pick_standing_table(tables) or tables[0]
-            df = df.dropna(how="all")
-            df.columns = [str(c).strip() for c in df.columns]
-            print(f"   → TAULA ESCOLLIDA: {list(df.columns)}  (files={len(df)})")
-            return df
+            if df is not None and not df.empty:
+                df = df.dropna(how="all")
+                # A vegades venen MultiIndex a columnes: aplanem
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = [" ".join([str(x) for x in tup if str(x).lower() != "unnamed: 0_level_1"]).strip()
+                                  for tup in df.columns.values]
+                else:
+                    df.columns = [str(c).strip() for c in df.columns]
+
+                print(f"   → TAULA ESCOLLIDA: {list(df.columns)}  (files={len(df)})")
+                return df
+            else:
+                print("   ⚠️  Taula buida o no vàlida.")
         except Exception as e:
-            print(f"   ✖️ Error amb {url}: {e}")
+            print(f"   ✖️  Error amb {url}: {e}")
             continue
     return None
 
 
-def save_outputs(df):
+def save_outputs(df: pd.DataFrame):
+    """Desa CSV i un TOP-3 en text pla per a OBS Text (GDI+)."""
     os.makedirs(OUT_DIR, exist_ok=True)
-    # CSV
+
+    # CSV complet
     df.to_csv(CSV_OUT, index=False, encoding="utf-8-sig")
     print("💾 CSV escrit:", CSV_OUT, "files:", len(df))
 
-    # TOP-3 text (per OBS Text GDI+)
+    # TOP-3 (heurística: 1a col = posició, 2a = equip, última = punts)
     top = df.head(3).copy()
     cols = list(top.columns)
+    def get(v, col): 
+        try:
+            return str(v.get(col, "")).strip()
+        except Exception:
+            return ""
+
     lines = []
     for _, r in top.iterrows():
-        pos = str(r.get(cols[0], "")).strip()
-        equip = str(r.get(cols[1], "")).strip()
-        punts = str(r.get(cols[-1], "")).strip()
+        pos = get(r, cols[0])
+        equip = get(r, cols[1])
+        punts = get(r, cols[-1])
         lines.append(f"{pos} - {equip} ({punts})")
+
     with open(TOP3_TXT, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
     print("📝 TOP3 escrit:", TOP3_TXT)
@@ -99,12 +141,11 @@ def main_loop(poll_seconds=300):
         try:
             run_once()
         except Exception as e:
-            print(f"✖️ Error inesperat: {e}")
+            print(f"✖️  Error inesperat: {e}")
         time.sleep(poll_seconds)
 
 
 if __name__ == "__main__":
-    # Si rep l'argument --once fa una sola passada i surt (ideal per proves)
     if "--once" in sys.argv:
         run_once()
     else:
