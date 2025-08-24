@@ -2,84 +2,124 @@
 """
 VSJ SF2 — Scraper de classificació RFEVB -> CSV local per a OBS
 
-- Intenta primer el microsite DataProject (HTML més “net”).
-- Si falla, prova la pàgina de rfevb.com.
-- Escriu:
+Escriu:
     C:\Guillem\Temporada 25-26\Overlay\VSJ\SF2\classificacio.csv
     C:\Guillem\Temporada 25-26\Overlay\VSJ\SF2\classificacio_top3.txt
-- Executa-ho de forma contínua (bucle) i programa-ho amb Task Scheduler.
 """
 
 import time
 import os
+import sys
+import io
+import datetime as dt
 import pandas as pd
 import requests
 
 OUT_DIR = r"C:\Guillem\Temporada 25-26\Overlay\VSJ\SF2"
 CSV_OUT = os.path.join(OUT_DIR, "classificacio.csv")
 TOP3_TXT = os.path.join(OUT_DIR, "classificacio_top3.txt")
+LOG_FILE = os.path.join(OUT_DIR, "scraper.log")
 
-# 👉 Quan surti la temporada nova, pot canviar l'ID del microsite. Actualitza aquesta llista si cal.
+# 👉 Actualitza l'ID quan surti la temporada nova
 URLS = [
-    "https://rfevb-web.dataproject.com/CompetitionHome.aspx?ID=136",  # exemple d'ID d'una temporada anterior
+    "https://rfevb-web.dataproject.com/CompetitionHome.aspx?ID=136",
     "https://www.rfevb.com/superliga-femenina-2-grupo-b-clasificacion",
 ]
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
+
+def log(msg):
+    ts = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{ts}] {msg}"
+    print(line, flush=True)
+    try:
+        os.makedirs(OUT_DIR, exist_ok=True)
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+
 
 def pick_standing_table(tables):
     """Tria la taula que sembli de classificació (pos, equip, punts...)."""
     KEYWORDS = ["pos", "equ", "team", "pt", "punt", "points", "pj", "jug"]
     best = None
     best_score = -1
-    for df in tables:
+    for i, df in enumerate(tables):
         cols = [str(c).strip().lower() for c in df.columns]
         score = sum(any(k in c for k in KEYWORDS) for c in cols)
+        log(f"  - Taula #{i} columnes: {cols} => score={score}")
         if score > best_score:
             best = df
             best_score = score
     return best
 
+
 def fetch_table():
     for url in URLS:
         try:
-            html = requests.get(url, headers=HEADERS, timeout=20).text
-            tables = pd.read_html(html)  # detecta totes les taules HTML
+            log(f"➡️  Baixant URL: {url}")
+            res = requests.get(url, headers=HEADERS, timeout=20)
+            res.raise_for_status()
+            html = res.text
+            # Future-proof: llegir HTML literal amb StringIO
+            tables = pd.read_html(io.StringIO(html))
+            log(f"   → trobades {len(tables)} taules HTML")
             if not tables:
                 continue
             df = pick_standing_table(tables) or tables[0]
             df = df.dropna(how="all")
             df.columns = [str(c).strip() for c in df.columns]
+            log(f"   → TAULA ESCOLLIDA: {list(df.columns)}  (files={len(df)})")
             return df
-        except Exception:
+        except Exception as e:
+            log(f"   ✖️ Error amb {url}: {e}")
             continue
     return None
+
 
 def save_outputs(df):
     os.makedirs(OUT_DIR, exist_ok=True)
     # CSV
     df.to_csv(CSV_OUT, index=False, encoding="utf-8-sig")
-    # TOP-3 (per OBS Text GDI+)
+    log(f"💾 Escrits {len(df)} registres a: {CSV_OUT}")
+
+    # TOP-3 text (per OBS Text GDI+)
     top = df.head(3).copy()
     cols = list(top.columns)
     lines = []
     for _, r in top.iterrows():
-        pos   = str(r.get(cols[0], "")).strip()
+        pos = str(r.get(cols[0], "")).strip()
         equip = str(r.get(cols[1], "")).strip()
         punts = str(r.get(cols[-1], "")).strip()
         lines.append(f"{pos} - {equip} ({punts})")
     with open(TOP3_TXT, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
+    log(f"📝 TOP-3 escrit a: {TOP3_TXT}")
+
+
+def run_once():
+    df = fetch_table()
+    if df is not None and not df.empty:
+        save_outputs(df)
+    else:
+        log("⚠️  No s'ha pogut obtenir cap taula de classificació.")
+
 
 def main_loop(poll_seconds=300):
     while True:
         try:
-            df = fetch_table()
-            if df is not None and not df.empty:
-                save_outputs(df)
-        except Exception:
-            pass
+            run_once()
+        except Exception as e:
+            log(f"✖️ Error inesperat: {e}")
         time.sleep(poll_seconds)
 
+
 if __name__ == "__main__":
-    main_loop(300)  # cada 5 minuts
+    # Si rep l'argument --once fa una sola passada i surt (ideal per proves)
+    if "--once" in sys.argv:
+        main_loop_flag = False
+        run_once()
+    else:
+        main_loop(300)  # cada 5 minuts
