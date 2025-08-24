@@ -29,7 +29,7 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
 def pick_standing_table(tables):
     """Tria la taula més probable de classificació per paraules clau."""
-    KEYWORDS = ["pos", "equ", "team", "pt", "punt", "points", "pj", "jug", "clasific"]
+    KEYWORDS = ["pos", "equ", "team", "pt", "punt", "points", "pj", "jug", "clasific", "clasificación"]
     best = None
     best_score = -1
     for i, df in enumerate(tables):
@@ -79,13 +79,20 @@ def fetch_table():
             if not tables:
                 continue
 
-            df = pick_standing_table(tables) or tables[0]
+            # ⚠️ No usar 'or' amb DataFrame: fa avaluació booleana i peta.
+            df = pick_standing_table(tables)
+            if df is None:
+                df = tables[0]
+
             if df is not None and not df.empty:
                 df = df.dropna(how="all")
                 # A vegades venen MultiIndex a columnes: aplanem
                 if isinstance(df.columns, pd.MultiIndex):
-                    df.columns = [" ".join([str(x) for x in tup if str(x).lower() != "unnamed: 0_level_1"]).strip()
-                                  for tup in df.columns.values]
+                    new_cols = []
+                    for tup in df.columns.values:
+                        parts = [str(x) for x in tup if not str(x).lower().startswith("unnamed")]
+                        new_cols.append(" ".join(parts).strip() or "col")
+                    df.columns = new_cols
                 else:
                     df.columns = [str(c).strip() for c in df.columns]
 
@@ -110,17 +117,18 @@ def save_outputs(df: pd.DataFrame):
     # TOP-3 (heurística: 1a col = posició, 2a = equip, última = punts)
     top = df.head(3).copy()
     cols = list(top.columns)
-    def get(v, col): 
+
+    def getval(row, colname):
         try:
-            return str(v.get(col, "")).strip()
+            return str(row.get(colname, "")).strip()
         except Exception:
             return ""
 
     lines = []
     for _, r in top.iterrows():
-        pos = get(r, cols[0])
-        equip = get(r, cols[1])
-        punts = get(r, cols[-1])
+        pos = getval(r, cols[0])
+        equip = getval(r, cols[1])
+        punts = getval(r, cols[-1])
         lines.append(f"{pos} - {equip} ({punts})")
 
     with open(TOP3_TXT, "w", encoding="utf-8") as f:
